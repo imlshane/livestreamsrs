@@ -1,0 +1,81 @@
+version: "3.9"
+
+volumes:
+  hls_data:
+  dvr_data:
+
+networks:
+  livestream_net:
+    driver: bridge
+
+services:
+
+  srs:
+    image: ossrs/srs:5
+    container_name: srs
+    restart: unless-stopped
+    ports:
+      - "1935:1935"   # RTMP ingest
+      - "8080:8080"   # SRS HTTP server (internal, for health check)
+    volumes:
+      - ./srs/srs.conf:/usr/local/srs/conf/srs.conf:ro
+      - hls_data:/hls-data
+      - dvr_data:/dvr
+    command: objs/srs -c conf/srs.conf
+    networks:
+      - livestream_net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/v1/versions"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  backend:
+    build: ./backend
+    container_name: backend
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - hls_data:/hls-data:ro
+      - dvr_data:/dvr
+    expose:
+      - "8000"
+    networks:
+      - livestream_net
+    depends_on:
+      srs:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  syncer:
+    build: ./syncer
+    container_name: syncer
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - hls_data:/hls-data:ro
+    networks:
+      - livestream_net
+    depends_on:
+      - backend
+
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+      - /var/www/certbot:/var/www/certbot:ro
+    networks:
+      - livestream_net
+    depends_on:
+      backend:
+        condition: service_healthy

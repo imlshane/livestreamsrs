@@ -1,0 +1,13 @@
+.env
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+.DS_Store
+*.log
+/dvr/
+/hls-data/
+backend/alembic/versions/__pycache__/
+.claude/
