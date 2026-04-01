@@ -24,12 +24,6 @@ services:
     command: objs/srs -c conf/srs.conf
     networks:
       - livestream_net
-    healthcheck:
-      test: ["CMD", "/bin/sh", "-c", "echo > /dev/tcp/localhost/1985"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-
   backend:
     build: ./backend
     container_name: backend
@@ -43,8 +37,7 @@ services:
     networks:
       - livestream_net
     depends_on:
-      srs:
-        condition: service_healthy
+      - srs
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 10s
@@ -77,5 +70,4 @@ services:
     networks:
       - livestream_net
     depends_on:
-      backend:
-        condition: service_healthy
+      - backend
