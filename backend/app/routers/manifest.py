@@ -1,63 +1,76 @@
 """
-Live manifest proxy — serves index.m3u8 bypassing CDN cache.
-Caches each manifest for 200ms to avoid hammering DO Spaces origin when multiple viewers poll.
-Segments are rewritten to full CDN URLs so browsers fetch them from the fast CDN edge.
+Live manifest proxy — builds HLS EVENT playlist from Redis segment registry.
+
+Key design decisions:
+- Segments are added to Redis ONLY after confirmed upload to DO Spaces.
+  This means the manifest NEVER references a segment that isn't available yet.
+  Eliminates the 404 → seek-back flickering in HLS.js.
+
+- EXT-X-PLAYLIST-TYPE:EVENT keeps the full stream from start in the manifest.
+  Viewers can scrub back to the beginning. Live edge is always at the end.
+  No latency impact — HLS.js naturally plays at the live edge.
+
+- Manifest built in memory from Redis — no DO Spaces fetch, no CDN cache issue.
+  50ms in-memory cache handles burst requests from multiple viewers.
 """
 import logging
 import time
 
-import httpx
 from fastapi import APIRouter, HTTPException, Response
 
 from app.config import settings
+from app.redis_client import get_redis, key
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/live", tags=["manifest"])
 
-SPACES_ORIGIN = settings.do_spaces_endpoint.rstrip("/")
-BUCKET = settings.do_spaces_bucket
-
-# In-memory cache: stream_key -> (content, fetched_at_monotonic)
+# Tiny in-memory cache to absorb burst requests (multiple viewers at same second)
 _cache: dict[str, tuple[str, float]] = {}
-CACHE_TTL = 0.2  # 200ms — fresh enough for 1s segments
+CACHE_TTL = 0.5  # 500ms
 
 
-async def _fetch_manifest(stream_key: str) -> str:
+async def _build_manifest(stream_key: str) -> str:
     now = time.monotonic()
     cached = _cache.get(stream_key)
     if cached and (now - cached[1]) < CACHE_TTL:
         return cached[0]
 
-    url = f"{SPACES_ORIGIN}/{BUCKET}/live/{stream_key}/index.m3u8"
-    async with httpx.AsyncClient(timeout=5.0) as client:
-        resp = await client.get(url)
-        if resp.status_code == 404:
-            raise HTTPException(status_code=404, detail="Stream not found or not yet live")
-        if resp.status_code != 200:
-            raise HTTPException(status_code=502, detail="Failed to fetch manifest from storage")
-        content = resp.text
-        _cache[stream_key] = (content, now)
-        return content
+    redis = await get_redis()
 
+    # Get all confirmed-uploaded segment sequence numbers
+    raw = await redis.lrange(key(f"stream:{stream_key}:segments"), 0, -1)
+    if not raw:
+        raise HTTPException(status_code=404, detail="Stream not found or no segments yet")
 
-def _rewrite_segment_urls(manifest: str, stream_key: str) -> str:
-    """Rewrite relative seg-N.ts filenames to absolute CDN URLs."""
+    seq_numbers = [int(s) for s in raw]
+    first_seq = seq_numbers[0]
     cdn_base = f"{settings.do_spaces_cdn_url}/live/{stream_key}"
-    lines = []
-    for line in manifest.splitlines():
-        stripped = line.strip()
-        if stripped and not stripped.startswith("#") and stripped.endswith(".ts"):
-            lines.append(f"{cdn_base}/{stripped}")
-        else:
-            lines.append(line)
-    return "\n".join(lines)
+
+    lines = [
+        "#EXTM3U",
+        "#EXT-X-VERSION:3",
+        "#EXT-X-TARGETDURATION:1",
+        "#EXT-X-PLAYLIST-TYPE:EVENT",       # full history, live edge at end
+        f"#EXT-X-MEDIA-SEQUENCE:{first_seq}",
+    ]
+
+    for seq in seq_numbers:
+        lines.append("#EXTINF:1.000,")
+        lines.append(f"{cdn_base}/seg-{seq}.ts")
+
+    # If stream has ended, close the playlist so player knows it's VOD now
+    ended = await redis.get(key(f"stream:{stream_key}:ended"))
+    if ended:
+        lines.append("#EXT-X-ENDLIST")
+
+    content = "\n".join(lines) + "\n"
+    _cache[stream_key] = (content, now)
+    return content
 
 
 @router.get("/{stream_key}/index.m3u8")
 async def get_live_manifest(stream_key: str):
-    manifest = await _fetch_manifest(stream_key)
-    manifest = _rewrite_segment_urls(manifest, stream_key)
-
+    manifest = await _build_manifest(stream_key)
     return Response(
         content=manifest,
         media_type="application/vnd.apple.mpegurl",

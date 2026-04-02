@@ -132,6 +132,9 @@ async def on_unpublish(
     if peak_str:
         live_stream.viewer_peak = int(peak_str)
 
+    # Mark stream ended in Redis (manifest proxy adds EXT-X-ENDLIST)
+    await redis.set(key(f"stream:{stream_key}:ended"), "1", ex=3600)
+
     # Clean up Redis
     await redis.srem(key("active_streams"), live_stream.id)
     await redis.delete(
@@ -173,16 +176,22 @@ async def _upload_hls_segment(app: str, stream_key: str, seq_no: int):
     import asyncio
 
     segment_local = f"{settings.hls_path}/{app}/{stream_key}/seg-{seq_no}.ts"
-    manifest_local = f"{settings.hls_path}/{app}/{stream_key}/index.m3u8"
     segment_key = f"live/{stream_key}/seg-{seq_no}.ts"
-    manifest_key = f"live/{stream_key}/index.m3u8"
 
     loop = asyncio.get_event_loop()
     try:
-        # Upload segment first, then manifest (order matters for player)
+        # Upload segment to DO Spaces
         await loop.run_in_executor(None, upload_file, segment_local, segment_key, True)
-        await loop.run_in_executor(None, upload_file, manifest_local, manifest_key, True)
-        logger.debug("uploaded seg-%d for %s", seq_no, stream_key)
+
+        # Only AFTER confirmed upload, add to Redis segment list.
+        # Manifest is built from this list — guarantees player never sees
+        # a segment URL before the segment is actually available.
+        redis = await get_redis()
+        stream_seg_key = key(f"stream:{stream_key}:segments")
+        await redis.rpush(stream_seg_key, seq_no)
+        await redis.expire(stream_seg_key, settings.stream_max_duration_seconds + 600)
+
+        logger.debug("seg-%d ready for %s", seq_no, stream_key)
     except Exception as e:
         logger.error("HLS upload failed seg-%d stream=%s: %s", seq_no, stream_key, e)
 
