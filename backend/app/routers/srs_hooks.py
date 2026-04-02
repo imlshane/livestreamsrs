@@ -111,7 +111,7 @@ async def on_unpublish(
         select(LiveStream).where(
             LiveStream.stream_key == stream_key,
             LiveStream.status == "live",
-        ).order_by(LiveStream.created_at.desc())
+        ).order_by(LiveStream.created_at.desc()).limit(1)
     )
     live_stream = result.scalar_one_or_none()
 
