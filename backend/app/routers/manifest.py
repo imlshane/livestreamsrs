@@ -49,13 +49,13 @@ async def _build_manifest(stream_key: str) -> str:
     lines = [
         "#EXTM3U",
         "#EXT-X-VERSION:3",
-        "#EXT-X-TARGETDURATION:1",
+        "#EXT-X-TARGETDURATION:2",
         "#EXT-X-PLAYLIST-TYPE:EVENT",       # full history, live edge at end
         f"#EXT-X-MEDIA-SEQUENCE:{first_seq}",
     ]
 
     for seq in seq_numbers:
-        lines.append("#EXTINF:1.000,")
+        lines.append("#EXTINF:2.000,")
         lines.append(f"{cdn_base}/seg-{seq}.ts")
 
     # If stream has ended, close the playlist so player knows it's VOD now
