@@ -1,29 +1,33 @@
 """
-Live manifest proxy — serves index.m3u8 fresh from DO Spaces origin on every request.
-
-Why: DO Spaces CDN caches manifests despite no-cache headers, breaking live HLS.
-This endpoint bypasses CDN for the manifest only. Segments still come from CDN.
-
-Player uses:  https://livestream.zinrai.live/api/live/{stream_key}/index.m3u8
-Segments use: https://livestreamcdn.zinrai.live/live/{stream_key}/seg-N.ts  (CDN)
+Live manifest proxy — serves index.m3u8 bypassing CDN cache.
+Caches each manifest for 200ms to avoid hammering DO Spaces origin when multiple viewers poll.
+Segments are rewritten to full CDN URLs so browsers fetch them from the fast CDN edge.
 """
 import logging
+import time
 
 import httpx
 from fastapi import APIRouter, HTTPException, Response
-from fastapi.responses import PlainTextResponse
 
 from app.config import settings
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/live", tags=["manifest"])
 
-# Fetch directly from DO Spaces origin, not CDN
 SPACES_ORIGIN = settings.do_spaces_endpoint.rstrip("/")
 BUCKET = settings.do_spaces_bucket
 
+# In-memory cache: stream_key -> (content, fetched_at_monotonic)
+_cache: dict[str, tuple[str, float]] = {}
+CACHE_TTL = 0.2  # 200ms — fresh enough for 1s segments
+
 
 async def _fetch_manifest(stream_key: str) -> str:
+    now = time.monotonic()
+    cached = _cache.get(stream_key)
+    if cached and (now - cached[1]) < CACHE_TTL:
+        return cached[0]
+
     url = f"{SPACES_ORIGIN}/{BUCKET}/live/{stream_key}/index.m3u8"
     async with httpx.AsyncClient(timeout=5.0) as client:
         resp = await client.get(url)
@@ -31,15 +35,13 @@ async def _fetch_manifest(stream_key: str) -> str:
             raise HTTPException(status_code=404, detail="Stream not found or not yet live")
         if resp.status_code != 200:
             raise HTTPException(status_code=502, detail="Failed to fetch manifest from storage")
-        return resp.text
+        content = resp.text
+        _cache[stream_key] = (content, now)
+        return content
 
 
 def _rewrite_segment_urls(manifest: str, stream_key: str) -> str:
-    """
-    Rewrite relative segment filenames to absolute CDN URLs.
-    SRS writes:  seg-N.ts
-    We want:     https://livestreamcdn.zinrai.live/live/{stream_key}/seg-N.ts
-    """
+    """Rewrite relative seg-N.ts filenames to absolute CDN URLs."""
     cdn_base = f"{settings.do_spaces_cdn_url}/live/{stream_key}"
     lines = []
     for line in manifest.splitlines():
@@ -53,10 +55,6 @@ def _rewrite_segment_urls(manifest: str, stream_key: str) -> str:
 
 @router.get("/{stream_key}/index.m3u8")
 async def get_live_manifest(stream_key: str):
-    """
-    Returns the live HLS manifest with hard no-cache headers.
-    Segments are rewritten to point to CDN.
-    """
     manifest = await _fetch_manifest(stream_key)
     manifest = _rewrite_segment_urls(manifest, stream_key)
 

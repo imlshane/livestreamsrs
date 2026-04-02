@@ -44,17 +44,7 @@ services:
       timeout: 5s
       retries: 5
 
-  syncer:
-    build: ./syncer
-    container_name: syncer
-    restart: unless-stopped
-    env_file: .env
-    volumes:
-      - hls_data:/hls-data:ro
-    networks:
-      - livestream_net
-    depends_on:
-      - backend
+  # syncer removed — on_hls hook handles uploads directly with zero polling delay
 
   nginx:
     image: nginx:1.27-alpine

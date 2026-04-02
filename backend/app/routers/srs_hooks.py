@@ -153,13 +153,38 @@ async def on_unpublish(
 
 
 @router.post("/on_hls")
-async def on_hls(payload: SRSHlsPayload):
+async def on_hls(payload: SRSHlsPayload, background_tasks: BackgroundTasks):
     """
-    Called by SRS for each HLS segment written.
-    The syncer container handles actual DO Spaces upload via file watching.
-    This hook is used only for logging / future extension.
+    Called by SRS immediately after each segment is written.
+    Upload segment + manifest to DO Spaces in background (non-blocking).
+    This replaces the polling syncer — zero delay between write and upload.
     """
+    background_tasks.add_task(
+        _upload_hls_segment,
+        payload.app,
+        payload.stream,
+        payload.seq_no,
+    )
     return {"code": 0}
+
+
+async def _upload_hls_segment(app: str, stream_key: str, seq_no: int):
+    from app.services.do_storage import upload_file
+    import asyncio
+
+    segment_local = f"{settings.hls_path}/{app}/{stream_key}/seg-{seq_no}.ts"
+    manifest_local = f"{settings.hls_path}/{app}/{stream_key}/index.m3u8"
+    segment_key = f"live/{stream_key}/seg-{seq_no}.ts"
+    manifest_key = f"live/{stream_key}/index.m3u8"
+
+    loop = asyncio.get_event_loop()
+    try:
+        # Upload segment first, then manifest (order matters for player)
+        await loop.run_in_executor(None, upload_file, segment_local, segment_key, True)
+        await loop.run_in_executor(None, upload_file, manifest_local, manifest_key, True)
+        logger.debug("uploaded seg-%d for %s", seq_no, stream_key)
+    except Exception as e:
+        logger.error("HLS upload failed seg-%d stream=%s: %s", seq_no, stream_key, e)
 
 
 @router.post("/on_error")
