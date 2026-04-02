@@ -5,7 +5,7 @@ All hooks must return HTTP 200 with {"code": 0} to allow the action,
 or non-zero code / non-200 status to reject.
 """
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from urllib.parse import parse_qs
 
 from fastapi import APIRouter, BackgroundTasks, Depends
@@ -65,10 +65,8 @@ async def on_publish(
         return {"code": 3, "error": "max concurrent streams reached"}
 
     # Create LiveStream session
-    now = datetime.now(timezone.utc)
-    timeout_at = datetime.fromtimestamp(
-        now.timestamp() + settings.stream_max_duration_seconds, tz=timezone.utc
-    )
+    now = datetime.utcnow()
+    timeout_at = now + timedelta(seconds=settings.stream_max_duration_seconds)
 
     hls_url = (
         f"{settings.do_spaces_cdn_url}/live/{stream_key}/index.m3u8"
@@ -121,7 +119,7 @@ async def on_unpublish(
         logger.warning("on_unpublish: no active stream found for key=%s", stream_key)
         return {"code": 0}
 
-    now = datetime.now(timezone.utc)
+    now = datetime.utcnow()
     duration = (now - live_stream.started_at).total_seconds() if live_stream.started_at else 0
 
     live_stream.status = "ended"

@@ -6,7 +6,7 @@ import asyncio
 import glob
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 
 from sqlalchemy import select
@@ -58,7 +58,7 @@ async def process_dvr_async(stream_id: str, stream_key: str, dvr_dir: str):
         logger.info("DVR: ffmpeg done, uploading to DO Spaces")
 
         # Upload MP4 to DO Spaces
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
         object_key = f"recordings/{stream_key}/{stream_id}_{timestamp}.mp4"
 
         loop = asyncio.get_event_loop()
