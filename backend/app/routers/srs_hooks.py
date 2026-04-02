@@ -18,6 +18,7 @@ from app.database import get_db
 from app.models import Educator, LiveStream
 from app.redis_client import get_redis, key
 from app.schemas import SRSErrorPayload, SRSHlsPayload, SRSPublishPayload, SRSUnpublishPayload
+from app.routers.manifest import invalidate_manifest_cache
 from app.services.dvr_processor import process_dvr_async
 
 logger = logging.getLogger(__name__)
@@ -92,12 +93,24 @@ async def on_publish(
     db.add(live_stream)
     await db.flush()
 
+    # Clear any stale state from a previous session with this stream key
+    await redis.delete(
+        key(f"stream:{stream_key}:segments"),
+        key(f"stream:{stream_key}:ended"),
+        key(f"stream:{stream_key}:id"),
+        key(f"stream:{stream_key}:viewers"),
+        key(f"stream:{stream_key}:peak"),
+        key(f"stream:{stream_key}:timeout"),
+    )
+
     # Track in Redis
     await redis.sadd(key("active_streams"), live_stream.id)
     await redis.set(key(f"stream:{stream_key}:id"), live_stream.id, ex=settings.stream_max_duration_seconds + 300)
     await redis.set(key(f"stream:{stream_key}:viewers"), "0", ex=settings.stream_max_duration_seconds + 300)
-    # Schedule hard timeout
     await redis.set(key(f"stream:{stream_key}:timeout"), str(timeout_at.timestamp()), ex=settings.stream_max_duration_seconds + 300)
+
+    # Bust any cached manifest from a previous session
+    invalidate_manifest_cache(stream_key)
 
     logger.info("Stream started: key=%s educator=%s id=%s", stream_key, educator.name, live_stream.id)
     return {"code": 0}

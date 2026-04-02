@@ -29,6 +29,11 @@ _cache: dict[str, tuple[str, float]] = {}
 CACHE_TTL = 0.5  # 500ms
 
 
+def invalidate_manifest_cache(stream_key: str) -> None:
+    """Call this when a stream starts/ends to immediately clear stale cached manifest."""
+    _cache.pop(stream_key, None)
+
+
 async def _build_manifest(stream_key: str) -> str:
     now = time.monotonic()
     cached = _cache.get(stream_key)
