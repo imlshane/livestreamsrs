@@ -89,7 +89,6 @@ async def on_publish(
 
     # Clear any stale state from a previous session with this stream key
     await redis.delete(
-        key(f"stream:{stream_key}:segments"),
         key(f"stream:{stream_key}:ended"),
         key(f"stream:{stream_key}:id"),
         key(f"stream:{stream_key}:viewers"),
@@ -170,17 +169,7 @@ async def on_unpublish(
 
 @router.post("/on_hls")
 async def on_hls(payload: SRSHlsPayload):
-    """
-    Called by SRS immediately after each segment is written to disk.
-    Segments are served directly by nginx from the shared hls_data volume —
-    no upload needed. Just register in Redis so the manifest proxy picks it up.
-    SRS fires hooks sequentially so order is guaranteed.
-    """
-    redis = await get_redis()
-    stream_seg_key = key(f"stream:{payload.stream}:segments")
-    await redis.rpush(stream_seg_key, payload.seq_no)
-    await redis.expire(stream_seg_key, settings.stream_max_duration_seconds + 600)
-    logger.debug("seg-%d registered for %s", payload.seq_no, payload.stream)
+    # Manifest now reads SRS m3u8 directly — no Redis tracking needed here.
     return {"code": 0}
 
 

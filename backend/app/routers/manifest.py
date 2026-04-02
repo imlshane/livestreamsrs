@@ -1,19 +1,17 @@
 """
-Live manifest proxy — builds HLS EVENT playlist from Redis segment registry.
+Live manifest proxy — reads SRS-generated m3u8 from disk and rewrites
+segment URLs to point at nginx (direct disk serve, zero upload delay).
 
-Key design decisions:
-- Segments are added to Redis ONLY after confirmed upload to DO Spaces.
-  This means the manifest NEVER references a segment that isn't available yet.
-  Eliminates the 404 → seek-back flickering in HLS.js.
-
-- EXT-X-PLAYLIST-TYPE:EVENT keeps the full stream from start in the manifest.
-  Viewers can scrub back to the beginning. Live edge is always at the end.
-  No latency impact — HLS.js naturally plays at the live edge.
-
-- Manifest built in memory from Redis — no DO Spaces fetch, no CDN cache issue.
-  50ms in-memory cache handles burst requests from multiple viewers.
+Why read SRS m3u8 instead of building from Redis:
+- SRS m3u8 is a sliding window of segments that actually exist on disk.
+  Our old EVENT playlist referenced ALL segments ever written, but SRS
+  deletes old ones (hls_cleanup on). Result: player gets 404 on ~95% of
+  segment requests → constant buffering.
+- SRS writes accurate EXTINF durations (not our hardcoded 2.000).
+- Standard live sliding window is what HLS.js is designed for.
 """
 import logging
+import os
 import time
 
 from fastapi import APIRouter, HTTPException, Response
@@ -24,13 +22,12 @@ from app.redis_client import get_redis, key
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/live", tags=["manifest"])
 
-# Tiny in-memory cache to absorb burst requests (multiple viewers at same second)
 _cache: dict[str, tuple[str, float]] = {}
-CACHE_TTL = 0.5  # 500ms
+CACHE_TTL = 0.5  # 500ms burst cache
 
 
 def invalidate_manifest_cache(stream_key: str) -> None:
-    """Call this when a stream starts/ends to immediately clear stale cached manifest."""
+    """Clear cached manifest when a stream starts/ends."""
     _cache.pop(stream_key, None)
 
 
@@ -40,35 +37,33 @@ async def _build_manifest(stream_key: str) -> str:
     if cached and (now - cached[1]) < CACHE_TTL:
         return cached[0]
 
-    redis = await get_redis()
+    m3u8_path = f"{settings.hls_path}/live/{stream_key}/index.m3u8"
+    try:
+        with open(m3u8_path, "r") as f:
+            srs_content = f.read()
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Stream not found or not started yet")
 
-    # Get all confirmed-uploaded segment sequence numbers
-    raw = await redis.lrange(key(f"stream:{stream_key}:segments"), 0, -1)
-    if not raw:
-        raise HTTPException(status_code=404, detail="Stream not found or no segments yet")
+    # Rewrite relative segment filenames → full nginx URLs
+    seg_base = f"{settings.segments_base_url}/live/{stream_key}"
+    lines = []
+    for line in srs_content.splitlines():
+        stripped = line.strip()
+        if stripped.endswith(".ts") and not stripped.startswith("#"):
+            lines.append(f"{seg_base}/{os.path.basename(stripped)}")
+        else:
+            lines.append(line)
 
-    seq_numbers = [int(s) for s in raw]
-    first_seq = seq_numbers[0]
-    cdn_base = f"{settings.segments_base_url}/live/{stream_key}"
+    content = "\n".join(lines)
 
-    lines = [
-        "#EXTM3U",
-        "#EXT-X-VERSION:3",
-        "#EXT-X-TARGETDURATION:2",
-        "#EXT-X-PLAYLIST-TYPE:EVENT",       # full history, live edge at end
-        f"#EXT-X-MEDIA-SEQUENCE:{first_seq}",
-    ]
+    # Add EXT-X-ENDLIST if stream has ended and SRS hasn't already added it
+    if "#EXT-X-ENDLIST" not in content:
+        redis = await get_redis()
+        ended = await redis.get(key(f"stream:{stream_key}:ended"))
+        if ended:
+            content += "\n#EXT-X-ENDLIST"
 
-    for seq in seq_numbers:
-        lines.append("#EXTINF:2.000,")
-        lines.append(f"{cdn_base}/seg-{seq}.ts")
-
-    # If stream has ended, close the playlist so player knows it's VOD now
-    ended = await redis.get(key(f"stream:{stream_key}:ended"))
-    if ended:
-        lines.append("#EXT-X-ENDLIST")
-
-    content = "\n".join(lines) + "\n"
+    content += "\n"
     _cache[stream_key] = (content, now)
     return content
 
