@@ -25,6 +25,8 @@ class Settings(BaseSettings):
 
     dvr_path: str = "/dvr"
     hls_path: str = "/hls-data"
+    # Base URL nginx uses to serve HLS segments directly from disk (no upload delay)
+    segments_base_url: str = "https://livestream.zinrai.live/segments"
 
     stream_max_duration_seconds: int = 7200
     max_concurrent_streams: int = 5

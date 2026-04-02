@@ -49,7 +49,7 @@ async def _build_manifest(stream_key: str) -> str:
 
     seq_numbers = [int(s) for s in raw]
     first_seq = seq_numbers[0]
-    cdn_base = f"{settings.do_spaces_cdn_url}/live/{stream_key}"
+    cdn_base = f"{settings.segments_base_url}/live/{stream_key}"
 
     lines = [
         "#EXTM3U",

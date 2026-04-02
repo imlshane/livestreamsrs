@@ -57,6 +57,7 @@ services:
       - ./nginx/conf.d:/etc/nginx/conf.d:ro
       - /etc/letsencrypt:/etc/letsencrypt:ro
       - /var/www/certbot:/var/www/certbot:ro
+      - hls_data:/hls-data:ro
     networks:
       - livestream_net
     depends_on:

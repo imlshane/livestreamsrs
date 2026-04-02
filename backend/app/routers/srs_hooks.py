@@ -4,9 +4,8 @@ SRS calls these on stream lifecycle events.
 All hooks must return HTTP 200 with {"code": 0} to allow the action,
 or non-zero code / non-200 status to reject.
 """
-import asyncio
 import logging
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta
 from urllib.parse import parse_qs
 
 from fastapi import APIRouter, BackgroundTasks, Depends
@@ -23,11 +22,6 @@ from app.services.dvr_processor import process_dvr_async
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/srs", tags=["srs-hooks"])
-
-# Per-stream upload lock: ensures segments are added to Redis in strict sequence order.
-# Without this, a slow upload of seg-N can cause seg-N+1 to appear in the manifest
-# first, creating gaps the player cannot fill (visible as timer jumps / missing seconds).
-_stream_upload_locks: dict[str, asyncio.Lock] = {}
 
 
 def _parse_secret(param: str) -> str | None:
@@ -175,46 +169,19 @@ async def on_unpublish(
 
 
 @router.post("/on_hls")
-async def on_hls(payload: SRSHlsPayload, background_tasks: BackgroundTasks):
+async def on_hls(payload: SRSHlsPayload):
     """
-    Called by SRS immediately after each segment is written.
-    Upload segment + manifest to DO Spaces in background (non-blocking).
-    This replaces the polling syncer — zero delay between write and upload.
+    Called by SRS immediately after each segment is written to disk.
+    Segments are served directly by nginx from the shared hls_data volume —
+    no upload needed. Just register in Redis so the manifest proxy picks it up.
+    SRS fires hooks sequentially so order is guaranteed.
     """
-    background_tasks.add_task(
-        _upload_hls_segment,
-        payload.app,
-        payload.stream,
-        payload.seq_no,
-    )
+    redis = await get_redis()
+    stream_seg_key = key(f"stream:{payload.stream}:segments")
+    await redis.rpush(stream_seg_key, payload.seq_no)
+    await redis.expire(stream_seg_key, settings.stream_max_duration_seconds + 600)
+    logger.debug("seg-%d registered for %s", payload.seq_no, payload.stream)
     return {"code": 0}
-
-
-async def _upload_hls_segment(app: str, stream_key: str, seq_no: int):
-    from app.services.do_storage import upload_file
-
-    # Acquire per-stream lock so uploads complete in sequence order.
-    # If seg-N+1 uploads faster than seg-N, it waits here until seg-N
-    # releases, guaranteeing Redis list is always contiguous.
-    if stream_key not in _stream_upload_locks:
-        _stream_upload_locks[stream_key] = asyncio.Lock()
-
-    async with _stream_upload_locks[stream_key]:
-        segment_local = f"{settings.hls_path}/{app}/{stream_key}/seg-{seq_no}.ts"
-        segment_key = f"live/{stream_key}/seg-{seq_no}.ts"
-
-        loop = asyncio.get_event_loop()
-        try:
-            await loop.run_in_executor(None, upload_file, segment_local, segment_key, True)
-
-            redis = await get_redis()
-            stream_seg_key = key(f"stream:{stream_key}:segments")
-            await redis.rpush(stream_seg_key, seq_no)
-            await redis.expire(stream_seg_key, settings.stream_max_duration_seconds + 600)
-
-            logger.debug("seg-%d ready for %s", seq_no, stream_key)
-        except Exception as e:
-            logger.error("HLS upload failed seg-%d stream=%s: %s", seq_no, stream_key, e)
 
 
 @router.post("/on_error")
