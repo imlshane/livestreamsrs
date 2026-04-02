@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.database import engine
 from app.redis_client import close_redis, get_redis
-from app.routers import health, srs_hooks, streams
+from app.routers import health, manifest, srs_hooks, streams
 
 logging.basicConfig(
     level=logging.INFO,
@@ -44,3 +44,4 @@ app.add_middleware(
 app.include_router(health.router)
 app.include_router(srs_hooks.router)
 app.include_router(streams.router)
+app.include_router(manifest.router)
