@@ -23,7 +23,7 @@ import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError
 from dotenv import load_dotenv
-from watchdog.events import FileCreatedEvent, FileModifiedEvent, FileSystemEventHandler
+from watchdog.events import FileCreatedEvent, FileModifiedEvent, FileMovedEvent, FileSystemEventHandler
 from watchdog.observers.polling import PollingObserver
 
 load_dotenv()
@@ -74,7 +74,7 @@ def upload(local_path: str, object_key: str):
                 "ACL": "public-read",
             },
         )
-        logger.debug("uploaded: %s", object_key)
+        logger.info("uploaded: %s", object_key)
     except ClientError as e:
         logger.error("upload failed %s: %s", object_key, e)
     except FileNotFoundError:
@@ -100,9 +100,14 @@ class HLSEventHandler(FileSystemEventHandler):
     def on_modified(self, event):
         if event.is_directory:
             return
-        # Only re-upload .m3u8 on modification (manifests update each segment)
         if event.src_path.endswith(".m3u8"):
             self._enqueue(event.src_path)
+
+    def on_moved(self, event):
+        # SRS writes seg-N.ts.tmp then renames to seg-N.ts — catch the rename
+        if event.is_directory:
+            return
+        self._enqueue(event.dest_path)
 
     def _enqueue(self, path: str):
         if path.endswith((".ts", ".m3u8")):
