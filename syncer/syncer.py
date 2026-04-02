@@ -24,7 +24,7 @@ from botocore.config import Config
 from botocore.exceptions import ClientError
 from dotenv import load_dotenv
 from watchdog.events import FileCreatedEvent, FileModifiedEvent, FileSystemEventHandler
-from watchdog.observers import Observer
+from watchdog.observers.polling import PollingObserver
 
 load_dotenv()
 
@@ -137,7 +137,7 @@ def main():
         t.start()
 
     handler = HLSEventHandler(upload_queue)
-    observer = Observer()
+    observer = PollingObserver(timeout=0.5)  # poll every 500ms — reliable across Docker volumes
     observer.schedule(handler, HLS_PATH, recursive=True)
     observer.start()
 
