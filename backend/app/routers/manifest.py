@@ -31,7 +31,7 @@ def invalidate_manifest_cache(stream_key: str) -> None:
     _cache.pop(stream_key, None)
 
 
-async def _build_manifest(stream_key: str) -> str:
+async def _build_manifest(stream_key: str, session_id: str) -> str:
     now = time.monotonic()
     cached = _cache.get(stream_key)
     if cached and (now - cached[1]) < CACHE_TTL:
@@ -44,12 +44,16 @@ async def _build_manifest(stream_key: str) -> str:
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Stream not found or not started yet")
 
-    # Rewrite relative segment filenames → full nginx URLs.
-    # Strip #EXT-X-DISCONTINUITY — SRS adds it at stream start because it detects
-    # a sequence gap from the previous session. Since every session has a unique URL
-    # the player starts completely fresh, so the discontinuity tag is wrong and causes
-    # HLS.js to reset its decoder on every manifest poll (visible as flicker).
-    seg_base = f"{settings.segments_base_url}/live/{stream_key}"
+    # Segment URL includes session_id as a path component — acts as cache-buster.
+    # Each stream session produces unique segment URLs so browsers never serve
+    # segments from a previous session. nginx strips the session_id before
+    # looking up the file: /segments/live/{stream_key}/{session_id}/seg-N.ts
+    #                                                → /hls-data/live/{stream_key}/seg-N.ts
+    #
+    # Also strip #EXT-X-DISCONTINUITY — SRS adds it at stream start due to sequence
+    # gap from previous session. With session-based URLs the player starts fresh
+    # each time, so this tag is incorrect and causes HLS.js to flicker.
+    seg_base = f"{settings.segments_base_url}/live/{stream_key}/{session_id}"
     lines = []
     for line in srs_content.splitlines():
         stripped = line.strip()
@@ -94,7 +98,7 @@ async def get_session_manifest(session_id: str):
     stream_key = await redis.get(key(f"session:{session_id}:stream_key"))
     if not stream_key:
         raise HTTPException(status_code=404, detail="Stream session not found or has ended")
-    manifest = await _build_manifest(stream_key)
+    manifest = await _build_manifest(stream_key, session_id)
     return Response(content=manifest, media_type="application/vnd.apple.mpegurl", headers=_MANIFEST_HEADERS)
 
 
