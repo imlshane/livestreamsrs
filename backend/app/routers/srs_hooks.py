@@ -136,7 +136,8 @@ async def on_unpublish(
         return {"code": 0}
 
     now = datetime.utcnow()
-    duration = (now - live_stream.started_at).total_seconds() if live_stream.started_at else 0
+    started = live_stream.started_at.replace(tzinfo=None) if live_stream.started_at else None
+    duration = (now - started).total_seconds() if started else 0
 
     live_stream.status = "ended"
     live_stream.ended_at = now
