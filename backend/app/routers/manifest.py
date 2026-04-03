@@ -44,11 +44,17 @@ async def _build_manifest(stream_key: str) -> str:
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Stream not found or not started yet")
 
-    # Rewrite relative segment filenames → full nginx URLs
+    # Rewrite relative segment filenames → full nginx URLs.
+    # Strip #EXT-X-DISCONTINUITY — SRS adds it at stream start because it detects
+    # a sequence gap from the previous session. Since every session has a unique URL
+    # the player starts completely fresh, so the discontinuity tag is wrong and causes
+    # HLS.js to reset its decoder on every manifest poll (visible as flicker).
     seg_base = f"{settings.segments_base_url}/live/{stream_key}"
     lines = []
     for line in srs_content.splitlines():
         stripped = line.strip()
+        if stripped == "#EXT-X-DISCONTINUITY":
+            continue
         if stripped.endswith(".ts") and not stripped.startswith("#"):
             lines.append(f"{seg_base}/{os.path.basename(stripped)}")
         else:
