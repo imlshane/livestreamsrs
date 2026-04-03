@@ -53,6 +53,11 @@ async def process_dvr_async(stream_id: str, stream_key: str, dvr_dir: str):
         if proc.returncode != 0:
             logger.error("DVR ffmpeg failed for %s: %s", flv_path, stderr.decode())
             await _update_stream(stream_id, error=f"ffmpeg failed: {stderr.decode()[-200:]}")
+            # Always remove FLV even on failure — don't let failed conversions fill the disk
+            try:
+                os.remove(flv_path)
+            except OSError:
+                pass
             return
 
         logger.info("DVR: ffmpeg done, uploading to DO Spaces")
