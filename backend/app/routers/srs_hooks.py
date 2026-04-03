@@ -69,23 +69,23 @@ async def on_publish(
     now = datetime.utcnow()
     timeout_at = now + timedelta(seconds=settings.stream_max_duration_seconds)
 
-    hls_url = (
-        f"{settings.do_spaces_cdn_url}/live/{stream_key}/index.m3u8"
-    )
-
     live_stream = LiveStream(
         stream_key=stream_key,
         educator_id=educator.id,
         title=f"{educator.name} — Live",
         status="live",
         started_at=now,
-        hls_manifest_url=hls_url,
+        hls_manifest_url="",   # set after flush once we have the UUID
         srs_client_id=payload.client_id,
         publisher_ip=payload.ip,
         timeout_at=timeout_at,
     )
     db.add(live_stream)
-    await db.flush()
+    await db.flush()   # populates live_stream.id
+
+    # Session-based manifest URL — unique per stream session, no cache clash
+    hls_url = f"https://{settings.domain}/live/{live_stream.id}/index.m3u8"
+    live_stream.hls_manifest_url = hls_url
 
     # Clear any stale state from a previous session with this stream key
     await redis.delete(
@@ -96,11 +96,15 @@ async def on_publish(
         key(f"stream:{stream_key}:timeout"),
     )
 
-    # Track in Redis
-    await redis.sadd(key("active_streams"), live_stream.id)
-    await redis.set(key(f"stream:{stream_key}:id"), live_stream.id, ex=settings.stream_max_duration_seconds + 300)
-    await redis.set(key(f"stream:{stream_key}:viewers"), "0", ex=settings.stream_max_duration_seconds + 300)
-    await redis.set(key(f"stream:{stream_key}:timeout"), str(timeout_at.timestamp()), ex=settings.stream_max_duration_seconds + 300)
+    ttl = settings.stream_max_duration_seconds + 300
+    # Forward mapping: stream_key → session id (for status endpoint)
+    await redis.set(key(f"stream:{stream_key}:id"), str(live_stream.id), ex=ttl)
+    # Reverse mapping: session id → stream_key (for manifest endpoint)
+    await redis.set(key(f"session:{live_stream.id}:stream_key"), stream_key, ex=ttl)
+
+    await redis.sadd(key("active_streams"), str(live_stream.id))
+    await redis.set(key(f"stream:{stream_key}:viewers"), "0", ex=ttl)
+    await redis.set(key(f"stream:{stream_key}:timeout"), str(timeout_at.timestamp()), ex=ttl)
 
     # Bust any cached manifest from a previous session
     invalidate_manifest_cache(stream_key)
@@ -148,9 +152,10 @@ async def on_unpublish(
     await redis.set(key(f"stream:{stream_key}:ended"), "1", ex=3600)
 
     # Clean up Redis
-    await redis.srem(key("active_streams"), live_stream.id)
+    await redis.srem(key("active_streams"), str(live_stream.id))
     await redis.delete(
         key(f"stream:{stream_key}:id"),
+        key(f"session:{live_stream.id}:stream_key"),
         key(f"stream:{stream_key}:viewers"),
         key(f"stream:{stream_key}:peak"),
         key(f"stream:{stream_key}:timeout"),

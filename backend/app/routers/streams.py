@@ -135,6 +135,27 @@ async def viewer_leave(stream_id: str, db: AsyncSession = Depends(get_db)):
     return {"viewer_count": count}
 
 
+@router.get("/status/{stream_key}")
+async def stream_status(stream_key: str):
+    """
+    Check if a streamer is currently live.
+    Returns is_live flag and the unique session m3u8 URL to pass to the player.
+    """
+    from app.config import settings as _settings
+    redis = await get_redis()
+    session_id = await redis.get(key(f"stream:{stream_key}:id"))
+    if not session_id:
+        return {"is_live": False, "stream_key": stream_key}
+
+    m3u8_url = f"https://{_settings.domain}/live/{session_id}/index.m3u8"
+    return {
+        "is_live": True,
+        "stream_key": stream_key,
+        "session_id": session_id,
+        "m3u8_url": m3u8_url,
+    }
+
+
 @router.get("/by-key/{stream_key}", response_model=LiveStreamOut)
 async def get_stream_by_key(
     stream_key: str,

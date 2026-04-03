@@ -68,24 +68,32 @@ async def _build_manifest(stream_key: str) -> str:
     return content
 
 
-@router.get("/{stream_key}/index.m3u8")
-async def get_live_manifest(stream_key: str):
+_MANIFEST_HEADERS = {
+    "Cache-Control": "no-cache, no-store, must-revalidate",
+    "Pragma": "no-cache",
+    "Expires": "0",
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, OPTIONS",
+}
+
+
+@router.get("/{session_id}/index.m3u8")
+async def get_session_manifest(session_id: str):
+    """
+    Session-based manifest URL — unique per stream session.
+    session_id is the live_stream UUID assigned at publish time.
+    Looks up stream_key from Redis, then reads SRS m3u8 from disk.
+    """
+    redis = await get_redis()
+    stream_key = await redis.get(key(f"session:{session_id}:stream_key"))
+    if not stream_key:
+        raise HTTPException(status_code=404, detail="Stream session not found or has ended")
     manifest = await _build_manifest(stream_key)
-    return Response(
-        content=manifest,
-        media_type="application/vnd.apple.mpegurl",
-        headers={
-            "Cache-Control": "no-cache, no-store, must-revalidate",
-            "Pragma": "no-cache",
-            "Expires": "0",
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "GET, OPTIONS",
-        },
-    )
+    return Response(content=manifest, media_type="application/vnd.apple.mpegurl", headers=_MANIFEST_HEADERS)
 
 
-@router.options("/{stream_key}/index.m3u8")
-async def manifest_cors_preflight(stream_key: str):
+@router.options("/{session_id}/index.m3u8")
+async def manifest_cors_preflight(session_id: str):
     return Response(
         headers={
             "Access-Control-Allow-Origin": "*",
