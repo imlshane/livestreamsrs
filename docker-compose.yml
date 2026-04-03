@@ -8,6 +8,14 @@ networks:
   livestream_net:
     driver: bridge
 
+# Logging defaults — apply to all services unless overridden.
+# Caps Docker log files at 50MB × 3 files = 150MB max per container.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "3"
+
 services:
 
   srs:
@@ -16,7 +24,7 @@ services:
     restart: unless-stopped
     ports:
       - "1935:1935"   # RTMP ingest
-      - "8080:8080"   # SRS HTTP server (internal, for health check)
+      - "8080:8080"   # SRS HTTP server
     volumes:
       - ./srs/srs.conf:/usr/local/srs/conf/srs.conf:ro
       - hls_data:/hls-data
@@ -24,6 +32,14 @@ services:
     command: objs/srs -c conf/srs.conf
     networks:
       - livestream_net
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: 1.5G    # 5 streams + GOP cache; restart if it leaks past this
+        reservations:
+          memory: 128M
+
   backend:
     build: ./backend
     container_name: backend
@@ -38,13 +54,19 @@ services:
       - livestream_net
     depends_on:
       - srs
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: 512M    # FastAPI + 5 concurrent DVR uploads; restart if it leaks
+        reservations:
+          memory: 64M
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 10s
       timeout: 5s
       retries: 5
-
-  # syncer removed — on_hls hook handles uploads directly with zero polling delay
+      start_period: 15s
 
   nginx:
     image: nginx:1.27-alpine
@@ -63,3 +85,14 @@ services:
       - livestream_net
     depends_on:
       - backend
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: 256M    # Static file serving; this should never be reached
+        reservations:
+          memory: 32M
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
