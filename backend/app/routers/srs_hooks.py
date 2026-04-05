@@ -86,7 +86,7 @@ async def on_publish(
     await db.flush()   # populates live_stream.id
 
     # Session-based manifest URL — unique per stream session, no cache clash
-    hls_url = f"https://{settings.domain}/live/{live_stream.id}/index.m3u8"
+    hls_url = f"https://{settings.domain}/live/{live_stream.id}.m3u8"
     live_stream.hls_manifest_url = hls_url
 
     # Clear any stale state from a previous session with this stream key

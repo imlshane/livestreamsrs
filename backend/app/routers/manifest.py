@@ -60,7 +60,10 @@ async def _build_manifest(stream_key: str, session_id: str) -> str:
         if stripped == "#EXT-X-DISCONTINUITY":
             continue
         if stripped.endswith(".ts") and not stripped.startswith("#"):
-            lines.append(f"{seg_base}/{os.path.basename(stripped)}")
+            # URL format: /segments/live/{stream_key}/{session_id}-seg-N.ts
+            # session_id is embedded in the filename (no subfolder) — nginx strips
+            # everything up to and including the UUID prefix before the disk lookup.
+            lines.append(f"{seg_base}-{os.path.basename(stripped)}")
         else:
             lines.append(line)
 
@@ -87,7 +90,7 @@ _MANIFEST_HEADERS = {
 }
 
 
-@router.get("/{session_id}/index.m3u8")
+@router.get("/{session_id}.m3u8")
 async def get_session_manifest(session_id: str):
     """
     Session-based manifest URL — unique per stream session.
@@ -102,7 +105,7 @@ async def get_session_manifest(session_id: str):
     return Response(content=manifest, media_type="application/vnd.apple.mpegurl", headers=_MANIFEST_HEADERS)
 
 
-@router.options("/{session_id}/index.m3u8")
+@router.options("/{session_id}.m3u8")
 async def manifest_cors_preflight(session_id: str):
     return Response(
         headers={

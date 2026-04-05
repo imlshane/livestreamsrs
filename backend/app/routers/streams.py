@@ -147,7 +147,7 @@ async def stream_status(stream_key: str):
     if not session_id:
         return {"is_live": False, "stream_key": stream_key}
 
-    m3u8_url = f"https://{_settings.domain}/live/{session_id}/index.m3u8"
+    m3u8_url = f"https://{_settings.domain}/live/{session_id}.m3u8"
     return {
         "is_live": True,
         "stream_key": stream_key,
