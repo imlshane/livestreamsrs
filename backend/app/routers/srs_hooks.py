@@ -5,6 +5,8 @@ All hooks must return HTTP 200 with {"code": 0} to allow the action,
 or non-zero code / non-200 status to reject.
 """
 import logging
+import os
+import shutil
 from datetime import datetime, timedelta
 from urllib.parse import parse_qs
 
@@ -108,6 +110,16 @@ async def on_publish(
 
     # Bust any cached manifest from a previous session
     invalidate_manifest_cache(stream_key)
+
+    # Delete stale HLS files from the previous session.
+    # hls_dispose keeps the old index.m3u8 and .ts files on disk for 60s after
+    # stream ends. Without this, the manifest proxy reads the old file and returns
+    # segments from the previous session under the new session's URL — player sees
+    # old video. Wiping the directory forces a clean slate; the player gets 404
+    # until SRS writes the first real segment of the new session (correct behaviour).
+    hls_dir = f"{settings.hls_path}/live/{stream_key}"
+    if os.path.isdir(hls_dir):
+        shutil.rmtree(hls_dir, ignore_errors=True)
 
     logger.info("Stream started: key=%s educator=%s id=%s", stream_key, educator.name, live_stream.id)
     return {"code": 0}
