@@ -42,7 +42,9 @@ async def _build_manifest(stream_key: str, session_id: str) -> str:
         with open(m3u8_path, "r") as f:
             srs_content = f.read()
     except FileNotFoundError:
-        raise HTTPException(status_code=404, detail="Stream not found or not started yet")
+        # SRS hasn't written the first segment yet (takes 2-4s after on_publish).
+        # Return a minimal valid live playlist so HLS.js keeps polling instead of failing.
+        return "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:0\n"
 
     # Segment URL includes session_id as a path component — acts as cache-buster.
     # Each stream session produces unique segment URLs so browsers never serve
