@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>Zinrai Live Stream Player</title>
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.8"></script>
+<style>
+  body { background:#111; display:flex; justify-content:center; align-items:center; height:100vh; margin:0; flex-direction:column; }
+  video { width:90vw; max-width:1280px; background:#000; border-radius:8px; }
+  #status { color:#aaa; font-family:monospace; margin-top:12px; font-size:14px; }
+  #error { color:#f44; font-family:monospace; margin-top:8px; font-size:12px; white-space:pre-wrap; max-width:800px; }
+</style>
+</head>
+<body>
+<video id="video" controls playsinline autoplay muted></video>
+<div id="status">Initializing...</div>
+<div id="error"></div>
+<script>
+const video = document.getElementById("video");
+const statusEl = document.getElementById("status");
+const errorEl = document.getElementById("error");
+
+const params = new URLSearchParams(location.search);
+const streamKey = params.get("key") || "test-stream-001";
+
+statusEl.textContent = "Checking stream status for: " + streamKey;
+
+fetch("/streams/status/" + streamKey)
+  .then(r => r.json())
+  .then(data => {
+    if (!data.is_live) {
+      statusEl.textContent = "Stream is not live: " + streamKey;
+      return;
+    }
+    statusEl.textContent = "Stream found, loading player...";
+    startPlayer(data.m3u8_url);
+  })
+  .catch(err => {
+    errorEl.textContent = "Status API error: " + err.message;
+  });
+
+function startPlayer(m3u8Url) {
+  if (Hls.isSupported()) {
+    const hls = new Hls({
+      lowLatencyMode: true,
+      liveSyncDurationCount: 3,
+      liveMaxLatencyDurationCount: 6,
+      maxLiveSyncPlaybackRate: 1.1,
+      manifestLoadingTimeOut: 10000,
+      levelLoadingTimeOut: 10000,
+      fragLoadingTimeOut: 10000,
+    });
+
+    hls.loadSource(m3u8Url);
+    hls.attachMedia(video);
+
+    hls.on(Hls.Events.MANIFEST_PARSED, () => {
+      video.play().catch(() => {});
+      statusEl.textContent = "Playing (click video to unmute)";
+    });
+
+    hls.on(Hls.Events.FRAG_LOADED, () => {
+      const latency = Math.round((video.duration || 0) - (video.currentTime || 0));
+      statusEl.textContent = "Playing \u2014 buffer: " + latency + "s behind live";
+      errorEl.textContent = "";
+    });
+
+    hls.on(Hls.Events.ERROR, (event, data) => {
+      errorEl.textContent = "HLS error: " + data.type + " / " + data.details +
+        (data.url ? "\nURL: " + data.url : "") +
+        (data.response ? "\nHTTP " + data.response.code : "");
+
+      if (data.fatal) {
+        if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+          statusEl.textContent = "Network error \u2014 retrying...";
+          setTimeout(() => hls.startLoad(), 1000);
+        } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+          statusEl.textContent = "Media error \u2014 recovering...";
+          hls.recoverMediaError();
+        } else {
+          statusEl.textContent = "Fatal error \u2014 stream may have ended";
+        }
+      }
+    });
+  } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
+    video.src = m3u8Url;
+    video.play().catch(() => {});
+    statusEl.textContent = "Playing (Safari native HLS)";
+  } else {
+    statusEl.textContent = "Your browser does not support HLS playback";
+  }
+}
+</script>
+</body>
+</html>
