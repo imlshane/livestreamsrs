@@ -24,7 +24,8 @@ services:
     restart: unless-stopped
     ports:
       - "1935:1935"   # RTMP ingest
-      - "8080:8080"   # SRS HTTP server
+      # SRS HTTP server — internal only (nginx + backend access via Docker network)
+      # NOT exposed publicly to prevent vulnerability scanners probing it
     volumes:
       - ./srs/srs.conf:/usr/local/srs/conf/srs.conf:ro
       - hls_data:/hls-data

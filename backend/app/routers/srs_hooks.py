@@ -5,8 +5,6 @@ All hooks must return HTTP 200 with {"code": 0} to allow the action,
 or non-zero code / non-200 status to reject.
 """
 import logging
-import os
-import shutil
 from datetime import datetime, timedelta
 from urllib.parse import parse_qs
 
@@ -111,15 +109,11 @@ async def on_publish(
     # Bust any cached manifest from a previous session
     invalidate_manifest_cache(stream_key)
 
-    # Delete stale HLS files from the previous session.
-    # hls_dispose keeps the old index.m3u8 and .ts files on disk for 60s after
-    # stream ends. Without this, the manifest proxy reads the old file and returns
-    # segments from the previous session under the new session's URL — player sees
-    # old video. Wiping the directory forces a clean slate; the player gets 404
-    # until SRS writes the first real segment of the new session (correct behaviour).
-    hls_dir = f"{settings.hls_path}/live/{stream_key}"
-    if os.path.isdir(hls_dir):
-        shutil.rmtree(hls_dir, ignore_errors=True)
+    # SRS handles segment cleanup via hls_cleanup + hls_dispose.
+    # Session-based manifest URLs (/live/{session_id}.m3u8) and session-prefixed
+    # segment URLs prevent browser cache clashes between sessions.
+    # We no longer rmtree the HLS directory — that caused a 2-4s video gap on
+    # OBS reconnects because SRS had to recreate the directory and first segment.
 
     logger.info("Stream started: key=%s educator=%s id=%s", stream_key, educator.name, live_stream.id)
     return {"code": 0}
@@ -134,17 +128,39 @@ async def on_unpublish(
     """Called by SRS when OBS stops publishing."""
     stream_key = payload.stream
 
-    # Find the active LiveStream
+    # Find the active LiveStream matching this SRS client_id.
+    # IMPORTANT: We match on srs_client_id (not just stream_key + status=live)
+    # to avoid a race condition where OBS reconnects quickly:
+    #   1. on_publish (new) fires first → creates session B
+    #   2. on_unpublish (old) fires later → would wrongly close session B
+    # By matching on client_id, the late on_unpublish only closes session A.
     result = await db.execute(
         select(LiveStream).where(
             LiveStream.stream_key == stream_key,
             LiveStream.status == "live",
-        ).order_by(LiveStream.created_at.desc()).limit(1)
+            LiveStream.srs_client_id == payload.client_id,
+        ).limit(1)
     )
     live_stream = result.scalar_one_or_none()
 
     if not live_stream:
-        logger.warning("on_unpublish: no active stream found for key=%s", stream_key)
+        # No match on client_id — either already ended, or a newer session
+        # replaced this one. Check if a newer live session exists (reconnect case).
+        result2 = await db.execute(
+            select(LiveStream).where(
+                LiveStream.stream_key == stream_key,
+                LiveStream.status == "live",
+            ).order_by(LiveStream.created_at.desc()).limit(1)
+        )
+        newer = result2.scalar_one_or_none()
+        if newer:
+            logger.info(
+                "on_unpublish: ignoring stale unpublish for key=%s client=%s "
+                "(newer session %s is live)",
+                stream_key, payload.client_id, newer.id,
+            )
+        else:
+            logger.warning("on_unpublish: no active stream found for key=%s client=%s", stream_key, payload.client_id)
         return {"code": 0}
 
     now = datetime.utcnow()
@@ -161,23 +177,31 @@ async def on_unpublish(
     if peak_str:
         live_stream.viewer_peak = int(peak_str)
 
-    # Mark stream ended in Redis (manifest proxy adds EXT-X-ENDLIST)
-    await redis.set(key(f"stream:{stream_key}:ended"), "1", ex=3600)
+    # Only set ended flag if no newer session has taken over.
+    # Check the current session_id in Redis — if it still points to THIS session,
+    # mark ended. If it points to a newer session, skip (don't kill the new stream).
+    current_session = await redis.get(key(f"stream:{stream_key}:id"))
+    if current_session == str(live_stream.id):
+        await redis.set(key(f"stream:{stream_key}:ended"), "1", ex=3600)
+        await redis.delete(
+            key(f"stream:{stream_key}:id"),
+            key(f"session:{live_stream.id}:stream_key"),
+            key(f"stream:{stream_key}:viewers"),
+            key(f"stream:{stream_key}:peak"),
+            key(f"stream:{stream_key}:timeout"),
+        )
+        invalidate_manifest_cache(stream_key)
+    else:
+        # A newer session owns this stream_key — only clean up our own session mapping
+        await redis.delete(key(f"session:{live_stream.id}:stream_key"))
+        logger.info("on_unpublish: newer session active, skipping stream-level Redis cleanup for key=%s", stream_key)
 
-    # Clean up Redis
     await redis.srem(key("active_streams"), str(live_stream.id))
-    await redis.delete(
-        key(f"stream:{stream_key}:id"),
-        key(f"session:{live_stream.id}:stream_key"),
-        key(f"stream:{stream_key}:viewers"),
-        key(f"stream:{stream_key}:peak"),
-        key(f"stream:{stream_key}:timeout"),
-    )
 
     stream_id = live_stream.id
     dvr_path = f"{settings.dvr_path}/live/{stream_key}"
 
-    logger.info("Stream ended: key=%s duration=%.0fs", stream_key, duration)
+    logger.info("Stream ended: key=%s session=%s duration=%.0fs", stream_key, stream_id, duration)
 
     # Process DVR in background (FLV → MP4 → DO Spaces upload)
     background_tasks.add_task(process_dvr_async, stream_id, stream_key, dvr_path)

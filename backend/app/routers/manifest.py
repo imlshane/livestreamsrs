@@ -27,13 +27,16 @@ CACHE_TTL = 0.5  # 500ms burst cache
 
 
 def invalidate_manifest_cache(stream_key: str) -> None:
-    """Clear cached manifest when a stream starts/ends."""
-    _cache.pop(stream_key, None)
+    """Clear cached manifests for a stream_key (all sessions)."""
+    to_remove = [k for k in _cache if k.startswith(f"{stream_key}:")]
+    for k in to_remove:
+        _cache.pop(k, None)
 
 
 async def _build_manifest(stream_key: str, session_id: str) -> str:
+    cache_key = f"{stream_key}:{session_id}"
     now = time.monotonic()
-    cached = _cache.get(stream_key)
+    cached = _cache.get(cache_key)
     if cached and (now - cached[1]) < CACHE_TTL:
         return cached[0]
 
@@ -79,7 +82,7 @@ async def _build_manifest(stream_key: str, session_id: str) -> str:
             content += "\n#EXT-X-ENDLIST"
 
     content += "\n"
-    _cache[stream_key] = (content, now)
+    _cache[cache_key] = (content, now)
     return content
 
 
