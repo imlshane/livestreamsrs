@@ -8,16 +8,21 @@
   video { width:90vw; max-width:1280px; background:#000; border-radius:8px; }
   #status { color:#aaa; font-family:monospace; margin-top:12px; font-size:14px; }
   #error { color:#f44; font-family:monospace; margin-top:8px; font-size:12px; white-space:pre-wrap; max-width:800px; }
+  #live-btn { background:#e33; color:#fff; border:none; padding:6px 16px; border-radius:4px; cursor:pointer; font-size:13px; margin-top:8px; display:none; }
+  #live-btn:hover { background:#c22; }
 </style>
 </head>
 <body>
 <video id="video" controls playsinline autoplay muted></video>
 <div id="status">Initializing...</div>
+<button id="live-btn" onclick="seekToLive()">Jump to LIVE</button>
 <div id="error"></div>
 <script>
 const video = document.getElementById("video");
 const statusEl = document.getElementById("status");
 const errorEl = document.getElementById("error");
+const liveBtn = document.getElementById("live-btn");
+let hls = null;
 
 const params = new URLSearchParams(location.search);
 const streamKey = params.get("key") || "test-stream-001";
@@ -38,16 +43,35 @@ fetch("/streams/status/" + streamKey)
     errorEl.textContent = "Status API error: " + err.message;
   });
 
+function seekToLive() {
+  if (hls && video.duration) {
+    video.currentTime = video.duration - 2;
+    liveBtn.style.display = "none";
+  }
+}
+
 function startPlayer(m3u8Url) {
   if (Hls.isSupported()) {
-    const hls = new Hls({
+    hls = new Hls({
+      // Low-latency tuning
       lowLatencyMode: true,
       liveSyncDurationCount: 3,
-      liveMaxLatencyDurationCount: 6,
+      liveMaxLatencyDurationCount: 8,
       maxLiveSyncPlaybackRate: 1.1,
-      manifestLoadingTimeOut: 10000,
-      levelLoadingTimeOut: 10000,
-      fragLoadingTimeOut: 10000,
+
+      // Generous timeouts for high-latency networks (India → NYC)
+      manifestLoadingTimeOut: 20000,
+      manifestLoadingMaxRetry: 6,
+      manifestLoadingRetryDelay: 1000,
+      levelLoadingTimeOut: 20000,
+      levelLoadingMaxRetry: 6,
+      levelLoadingRetryDelay: 1000,
+      fragLoadingTimeOut: 30000,
+      fragLoadingMaxRetry: 6,
+      fragLoadingRetryDelay: 1000,
+
+      // Back-buffer: keep 30s of played segments in memory for rewind
+      backBufferLength: 30,
     });
 
     hls.loadSource(m3u8Url);
@@ -59,28 +83,59 @@ function startPlayer(m3u8Url) {
     });
 
     hls.on(Hls.Events.FRAG_LOADED, () => {
-      const latency = Math.round((video.duration || 0) - (video.currentTime || 0));
-      statusEl.textContent = "Playing \u2014 buffer: " + latency + "s behind live";
+      const behind = Math.round((video.duration || 0) - (video.currentTime || 0));
+      statusEl.textContent = "Playing \u2014 " + behind + "s behind live";
       errorEl.textContent = "";
+
+      // Show "Jump to LIVE" button if too far behind
+      if (behind > 15) {
+        liveBtn.style.display = "inline-block";
+      } else {
+        liveBtn.style.display = "none";
+      }
     });
 
     hls.on(Hls.Events.ERROR, (event, data) => {
-      errorEl.textContent = "HLS error: " + data.type + " / " + data.details +
-        (data.url ? "\nURL: " + data.url : "") +
-        (data.response ? "\nHTTP " + data.response.code : "");
+      const detail = data.type + " / " + data.details;
+      console.warn("HLS error:", data);
 
       if (data.fatal) {
+        errorEl.textContent = "Error: " + detail;
+
         if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
           statusEl.textContent = "Network error \u2014 retrying...";
-          setTimeout(() => hls.startLoad(), 1000);
+          setTimeout(() => {
+            hls.startLoad();
+            // After recovery, seek to live edge to avoid fetching deleted segments
+            setTimeout(() => {
+              if (video.duration) {
+                video.currentTime = video.duration - 4;
+              }
+            }, 2000);
+          }, 1000);
         } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
           statusEl.textContent = "Media error \u2014 recovering...";
           hls.recoverMediaError();
         } else {
           statusEl.textContent = "Fatal error \u2014 stream may have ended";
         }
+      } else {
+        // Non-fatal: just log, don't alarm user
+        errorEl.textContent = "";
       }
     });
+
+    // Auto seek to live edge if player falls too far behind (>20s)
+    setInterval(() => {
+      if (video.duration && video.currentTime) {
+        const behind = video.duration - video.currentTime;
+        if (behind > 20) {
+          console.log("Auto-seeking to live edge (was " + Math.round(behind) + "s behind)");
+          video.currentTime = video.duration - 4;
+        }
+      }
+    }, 5000);
+
   } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
     video.src = m3u8Url;
     video.play().catch(() => {});
